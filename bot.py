@@ -11,13 +11,13 @@ from discord.ext import commands
 from dotenv import load_dotenv
 
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
-
 load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
+
+if not DISCORD_TOKEN:
+    print("DISCORD_TOKEN is missing. Add it to your .env file or Render Environment Variables.")
+    raise SystemExit(1)
 
 CONFIG_FILE = "config.json"
 
