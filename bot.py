@@ -1,103 +1,74 @@
-import json
 import logging
 import os
 import re
+import json
 from datetime import datetime, timezone
 from typing import Optional
 
 import discord
 from discord import app_commands
 from discord.ext import commands
+from dotenv import load_dotenv
 
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
 
-CONFIG_FILE = "config.json"
+load_dotenv()
 
-DISCORD_TOKEN = os.getenv("MTUzOTM5ODk4NjgwMzQ0OTg1Ng.GWmNqk.09N63dRw15TJjrZwmpJqb8ru_mFehuTlcxR8ec", "").strip()
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
+
+CONFIG_FILE = "config.json"
 
 
 DEFAULT_CONFIG = {
-    "guild_id": 0,
-    "ticket_category_id": 0,
-    "staff_role_id": 0,
-    "server_info_channel_id": 0,
+    "guild_id": None,
+    "ticket_category_id": None,
+    "staff_role_id": None,
+    "server_info_channel_id": None,
 
     "panel_title": "Support Ticket Center",
-
     "panel_description": (
-        "Select a category from the dropdown menu below to "
-        "open a private support ticket with our staff team."
+        "Select a category from the dropdown menu below "
+        "to open a private support ticket with our staff team."
     ),
 
-    "ticket_welcome_message": (
+    "welcome_message": (
         "Thank you for contacting the staff team.\n\n"
         "A staff member will respond shortly.\n\n"
-        "Please provide as much relevant information as "
-        "possible so we can assist you quickly."
+        "Please provide as much relevant information as possible "
+        "so we can assist you quickly."
     ),
-
-    "ticket_types": {
-        "general": {
-            "label": "General Support",
-            "description": "Open a ticket for general assistance.",
-            "emoji": "🎫",
-            "prefix": "support",
-        },
-        "bug": {
-            "label": "Bug Report",
-            "description": "Report a bug or technical issue.",
-            "emoji": "🐛",
-            "prefix": "bug",
-        },
-        "report": {
-            "label": "Player Report",
-            "description": "Report a player to the staff team.",
-            "emoji": "🚨",
-            "prefix": "report",
-        },
-    },
 }
 
 
 def load_config():
     if not os.path.exists(CONFIG_FILE):
-        save_config(DEFAULT_CONFIG)
+        save_config(DEFAULT_CONFIG.copy())
+        return DEFAULT_CONFIG.copy()
 
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as file:
             config = json.load(file)
 
-    except (json.JSONDecodeError, OSError):
-        config = DEFAULT_CONFIG.copy()
-        save_config(config)
+        for key, value in DEFAULT_CONFIG.items():
+            if key not in config:
+                config[key] = value
 
-    # Make sure new settings get added automatically.
-    changed = False
+        return config
 
-    for key, value in DEFAULT_CONFIG.items():
-        if key not in config:
-            config[key] = value
-            changed = True
-
-    if changed:
-        save_config(config)
-
-    return config
+    except Exception:
+        logger.exception("Could not load config.json.")
+        return DEFAULT_CONFIG.copy()
 
 
 def save_config(config):
     try:
         with open(CONFIG_FILE, "w", encoding="utf-8") as file:
-            json.dump(
-                config,
-                file,
-                indent=4,
-                ensure_ascii=False,
-            )
-    except OSError:
+            json.dump(config, file, indent=4)
+
+    except Exception:
         logger.exception("Could not save config.json.")
 
 
@@ -117,24 +88,83 @@ logger = logging.getLogger("discord-ticket-bot")
 
 
 # ============================================================
+# INTENTS
+# ============================================================
+
+intents = discord.Intents.default()
+intents.guilds = True
+
+
+# ============================================================
+# BOT
+# ============================================================
+
+class TicketBot(commands.Bot):
+
+    def __init__(self):
+        super().__init__(
+            command_prefix="!",
+            intents=intents,
+            reconnect=True,
+        )
+
+    async def setup_hook(self):
+
+        self.add_view(TicketPanelView())
+
+        try:
+
+            guild_id = config.get("guild_id")
+
+            if guild_id:
+
+                guild = discord.Object(id=int(guild_id))
+
+                self.tree.copy_global_to(guild=guild)
+
+                synced = await self.tree.sync(guild=guild)
+
+                logger.info(
+                    "Slash commands synchronized: %d command(s).",
+                    len(synced),
+                )
+
+            else:
+
+                synced = await self.tree.sync()
+
+                logger.info(
+                    "Global slash commands synchronized: %d command(s).",
+                    len(synced),
+                )
+
+        except Exception:
+            logger.exception(
+                "Error while synchronizing slash commands."
+            )
+
+    async def on_ready(self):
+
+        if self.user is None:
+            return
+
+        logger.info("========================================")
+        logger.info("Bot is online!")
+        logger.info("Bot username: %s", self.user)
+        logger.info("Bot ID: %s", self.user.id)
+        logger.info("Guild count: %d", len(self.guilds))
+        logger.info("========================================")
+
+
+bot = TicketBot()
+
+
+# ============================================================
 # HELPERS
 # ============================================================
 
-def get_config_id(name: str) -> Optional[int]:
-    value = config.get(name, 0)
-
-    try:
-        value = int(value)
-    except (TypeError, ValueError):
-        return None
-
-    if value <= 0:
-        return None
-
-    return value
-
-
 def clean_username(username: str) -> str:
+
     username = username.lower()
 
     username = re.sub(
@@ -157,6 +187,20 @@ def clean_username(username: str) -> str:
     return username[:70]
 
 
+def get_ticket_type_label(ticket_type: str) -> str:
+
+    labels = {
+        "general": "General Support",
+        "bug": "Bug Report",
+        "report": "Player Report",
+    }
+
+    return labels.get(
+        ticket_type,
+        ticket_type.title(),
+    )
+
+
 def make_error_embed(
     title: str,
     description: str,
@@ -166,25 +210,6 @@ def make_error_embed(
         title=title,
         description=description,
         color=discord.Color.red(),
-        timestamp=datetime.now(timezone.utc),
-    )
-
-    embed.set_footer(
-        text="Powered by Python Discord Bot"
-    )
-
-    return embed
-
-
-def make_success_embed(
-    title: str,
-    description: str,
-) -> discord.Embed:
-
-    embed = discord.Embed(
-        title=title,
-        description=description,
-        color=discord.Color.green(),
         timestamp=datetime.now(timezone.utc),
     )
 
@@ -206,137 +231,18 @@ def make_ticket_topic(
     )
 
 
-def get_ticket_type_label(ticket_type: str) -> str:
-    ticket = config["ticket_types"].get(ticket_type)
-
-    if ticket:
-        return ticket.get(
-            "label",
-            ticket_type.title(),
-        )
-
-    return ticket_type.title()
-
-
-def is_admin(interaction: discord.Interaction) -> bool:
-    if interaction.guild is None:
-        return False
-
-    return interaction.user.guild_permissions.administrator
-
-
-# ============================================================
-# INTENTS
-# ============================================================
-
-intents = discord.Intents.default()
-intents.guilds = True
-
-
-# ============================================================
-# BOT
-# ============================================================
-
-class TicketBot(commands.Bot):
-
-    def __init__(self):
-
-        super().__init__(
-            command_prefix="!",
-            intents=intents,
-            reconnect=True,
-        )
-
-    async def setup_hook(self):
-
-        self.add_view(
-            TicketPanelView()
-        )
-
-        guild_id = get_config_id("guild_id")
-
-        try:
-
-            if guild_id:
-
-                guild = discord.Object(
-                    id=guild_id
-                )
-
-                self.tree.copy_global_to(
-                    guild=guild
-                )
-
-                synced = await self.tree.sync(
-                    guild=guild
-                )
-
-                logger.info(
-                    "Synced %d command(s) to guild %s.",
-                    len(synced),
-                    guild_id,
-                )
-
-            else:
-
-                synced = await self.tree.sync()
-
-                logger.info(
-                    "Synced %d global command(s).",
-                    len(synced),
-                )
-
-        except Exception:
-            logger.exception(
-                "Could not synchronize slash commands."
-            )
-
-    async def on_ready(self):
-
-        if self.user is None:
-            return
-
-        logger.info(
-            "Bot is online!"
-        )
-
-        logger.info(
-            "Bot username: %s",
-            self.user,
-        )
-
-        logger.info(
-            "Bot ID: %s",
-            self.user.id,
-        )
-
-        logger.info(
-            "Guild count: %d",
-            len(self.guilds),
-        )
-
-
-bot = TicketBot()
-
-
-# ============================================================
-# FIND EXISTING TICKET
-# ============================================================
-
 async def find_existing_ticket(
     guild: discord.Guild,
     user_id: int,
 ) -> Optional[discord.TextChannel]:
 
-    category_id = get_config_id(
-        "ticket_category_id"
-    )
+    category_id = config.get("ticket_category_id")
 
-    if category_id is None:
+    if not category_id:
         return None
 
     category = guild.get_channel(
-        category_id
+        int(category_id)
     )
 
     if not isinstance(
@@ -345,9 +251,7 @@ async def find_existing_ticket(
     ):
         return None
 
-    owner_marker = (
-        f"ticket_owner={user_id};"
-    )
+    owner_marker = f"ticket_owner={user_id};"
 
     for channel in category.text_channels:
 
@@ -368,50 +272,29 @@ class TicketSelect(discord.ui.Select):
 
     def __init__(self):
 
-        options = []
+        options = [
 
-        ticket_types = config.get(
-            "ticket_types",
-            {},
-        )
+            discord.SelectOption(
+                label="General Support",
+                description="Open a ticket for general assistance.",
+                value="general",
+                emoji="🎫",
+            ),
 
-        for value, data in ticket_types.items():
+            discord.SelectOption(
+                label="Bug Report",
+                description="Report a bug or technical issue.",
+                value="bug",
+                emoji="🐛",
+            ),
 
-            options.append(
-                discord.SelectOption(
-                    label=data.get(
-                        "label",
-                        value.title(),
-                    )[:100],
-
-                    description=data.get(
-                        "description",
-                        "Open a support ticket.",
-                    )[:100],
-
-                    value=value,
-
-                    emoji=data.get(
-                        "emoji",
-                        "🎫",
-                    ),
-                )
-            )
-
-        # Discord requires at least one option.
-        if not options:
-
-            options.append(
-                discord.SelectOption(
-                    label="Support",
-                    description="Open a support ticket.",
-                    value="general",
-                    emoji="🎫",
-                )
-            )
-
-        # Discord allows a maximum of 25 options.
-        options = options[:25]
+            discord.SelectOption(
+                label="Player Report",
+                description="Report a player to the staff team.",
+                value="report",
+                emoji="🚨",
+            ),
+        ]
 
         super().__init__(
             placeholder="Select a ticket category...",
@@ -461,8 +344,8 @@ class TicketSelect(discord.ui.Select):
                 embed=make_error_embed(
                     "Permission Error",
                     (
-                        "I do not have enough permissions to "
-                        "create the ticket channel.\n\n"
+                        "I do not have enough permissions to create "
+                        "the ticket channel.\n\n"
                         "Make sure the bot has **Manage Channels** "
                         "permission."
                     ),
@@ -473,14 +356,17 @@ class TicketSelect(discord.ui.Select):
         except discord.HTTPException as exc:
 
             logger.error(
-                "Discord API error: %s",
+                "Discord API error while creating ticket: %s",
                 exc,
             )
 
             await interaction.followup.send(
                 embed=make_error_embed(
                     "Discord API Error",
-                    "Discord returned an error while creating your ticket.",
+                    (
+                        "Discord returned an error while creating "
+                        "your ticket. Please try again."
+                    ),
                 ),
                 ephemeral=True,
             )
@@ -495,8 +381,8 @@ class TicketSelect(discord.ui.Select):
                 embed=make_error_embed(
                     "Ticket Creation Failed",
                     (
-                        "Something went wrong while creating "
-                        "your ticket."
+                        "Something went wrong while creating your "
+                        "ticket."
                     ),
                 ),
                 ephemeral=True,
@@ -530,22 +416,22 @@ async def create_ticket(
     if guild is None:
         return
 
-    category_id = get_config_id(
+    category_id = config.get(
         "ticket_category_id"
     )
 
-    staff_role_id = get_config_id(
+    staff_role_id = config.get(
         "staff_role_id"
     )
 
-    if category_id is None:
+    if not category_id:
 
         await interaction.followup.send(
             embed=make_error_embed(
                 "Configuration Error",
                 (
                     "No ticket category has been configured.\n\n"
-                    "An administrator should use "
+                    "An administrator needs to run "
                     "`/config category`."
                 ),
             ),
@@ -554,14 +440,14 @@ async def create_ticket(
 
         return
 
-    if staff_role_id is None:
+    if not staff_role_id:
 
         await interaction.followup.send(
             embed=make_error_embed(
                 "Configuration Error",
                 (
                     "No staff role has been configured.\n\n"
-                    "An administrator should use "
+                    "An administrator needs to run "
                     "`/config staffrole`."
                 ),
             ),
@@ -571,7 +457,7 @@ async def create_ticket(
         return
 
     category = guild.get_channel(
-        category_id
+        int(category_id)
     )
 
     if not isinstance(
@@ -590,7 +476,7 @@ async def create_ticket(
         return
 
     staff_role = guild.get_role(
-        staff_role_id
+        int(staff_role_id)
     )
 
     if staff_role is None:
@@ -626,23 +512,18 @@ async def create_ticket(
 
         return
 
-    ticket_data = config["ticket_types"].get(
-        ticket_type
-    )
-
-    if ticket_data is None:
-
-        ticket_data = {
-            "label": "Support",
-            "prefix": "ticket",
-        }
-
     username = clean_username(
         interaction.user.name
     )
 
-    prefix = ticket_data.get(
-        "prefix",
+    prefixes = {
+        "general": "support",
+        "bug": "bug",
+        "report": "report",
+    }
+
+    prefix = prefixes.get(
+        ticket_type,
         "ticket",
     )
 
@@ -654,27 +535,24 @@ async def create_ticket(
 
     overwrites = {
 
-        everyone_role:
-            discord.PermissionOverwrite(
-                view_channel=False,
-            ),
+        everyone_role: discord.PermissionOverwrite(
+            view_channel=False,
+        ),
 
-        interaction.user:
-            discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=True,
-                read_message_history=True,
-                attach_files=True,
-            ),
+        interaction.user: discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=True,
+            read_message_history=True,
+            attach_files=True,
+        ),
 
-        staff_role:
-            discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=True,
-                read_message_history=True,
-                attach_files=True,
-                manage_messages=True,
-            ),
+        staff_role: discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=True,
+            read_message_history=True,
+            attach_files=True,
+            manage_messages=True,
+        ),
     }
 
     channel = await guild.create_text_channel(
@@ -698,8 +576,8 @@ async def create_ticket(
     welcome_embed = discord.Embed(
         title="Support Ticket Created",
         description=config.get(
-            "ticket_welcome_message",
-            "Thank you for contacting the staff team.",
+            "welcome_message",
+            DEFAULT_CONFIG["welcome_message"],
         ),
         color=discord.Color.cyan(),
         timestamp=datetime.now(timezone.utc),
@@ -721,32 +599,25 @@ async def create_ticket(
         text="Powered by Python Discord Bot"
     )
 
-    try:
+    await channel.send(
+        content=(
+            f"{interaction.user.mention} "
+            f"{staff_role.mention}"
+        ),
+        embed=welcome_embed,
+        allowed_mentions=discord.AllowedMentions(
+            users=True,
+            roles=True,
+        ),
+    )
 
-        await channel.send(
-            content=(
-                f"{interaction.user.mention} "
-                f"{staff_role.mention}"
-            ),
-            embed=welcome_embed,
-            allowed_mentions=discord.AllowedMentions(
-                users=True,
-                roles=True,
-            ),
-        )
-
-    except discord.HTTPException:
-
-        logger.exception(
-            "Could not send ticket welcome message."
-        )
-
-    success_embed = make_success_embed(
-        "Ticket Created",
-        (
+    success_embed = discord.Embed(
+        title="Ticket Created",
+        description=(
             f"Your {ticket_label.lower()} ticket has been created:\n"
             f"{channel.mention}"
         ),
+        color=discord.Color.green(),
     )
 
     await interaction.followup.send(
@@ -762,12 +633,12 @@ async def create_ticket(
 
 
 # ============================================================
-# /SETTICKETPANEL
+# /setticketpanel
 # ============================================================
 
 @bot.tree.command(
     name="setticketpanel",
-    description="Post the support ticket panel",
+    description="Post the support ticket dropdown panel",
 )
 async def setticketpanel(
     interaction: discord.Interaction,
@@ -776,16 +647,22 @@ async def setticketpanel(
     if interaction.guild is None:
 
         await interaction.response.send_message(
-            "This command can only be used in a server.",
+            embed=make_error_embed(
+                "Server Only",
+                "This command can only be used inside a server.",
+            ),
             ephemeral=True,
         )
 
         return
 
-    if not is_admin(interaction):
+    if not interaction.user.guild_permissions.manage_guild:
 
         await interaction.response.send_message(
-            "You need Administrator permission to use this command.",
+            embed=make_error_embed(
+                "Permission Denied",
+                "You need **Manage Server** permission to use this command.",
+            ),
             ephemeral=True,
         )
 
@@ -794,11 +671,11 @@ async def setticketpanel(
     panel_embed = discord.Embed(
         title=config.get(
             "panel_title",
-            "Support Ticket Center",
+            DEFAULT_CONFIG["panel_title"],
         ),
         description=config.get(
             "panel_description",
-            "Open a support ticket below.",
+            DEFAULT_CONFIG["panel_description"],
         ),
         color=discord.Color.cyan(),
     )
@@ -815,26 +692,29 @@ async def setticketpanel(
         )
 
         await interaction.response.send_message(
-            embed=make_success_embed(
-                "Ticket Panel Posted",
-                "The support ticket panel has been posted.",
+            embed=discord.Embed(
+                title="Ticket Panel Posted",
+                description="The support ticket panel has been posted.",
+                color=discord.Color.green(),
             ),
             ephemeral=True,
         )
 
     except discord.Forbidden:
 
-        await interaction.response.send_message(
-            embed=make_error_embed(
-                "Permission Error",
-                "I cannot send messages in this channel.",
-            ),
-            ephemeral=True,
-        )
+        if not interaction.response.is_done():
+
+            await interaction.response.send_message(
+                embed=make_error_embed(
+                    "Permission Error",
+                    "I cannot send messages in this channel.",
+                ),
+                ephemeral=True,
+            )
 
 
 # ============================================================
-# /SERVERINFO
+# /serverinfo
 # ============================================================
 
 @bot.tree.command(
@@ -848,26 +728,25 @@ async def serverinfo(
     if interaction.guild is None:
 
         await interaction.response.send_message(
-            "This command can only be used in a server.",
+            embed=make_error_embed(
+                "Server Only",
+                "This command can only be used inside a server.",
+            ),
             ephemeral=True,
         )
 
         return
 
-    channel_id = get_config_id(
+    channel_id = config.get(
         "server_info_channel_id"
     )
 
-    if channel_id is None:
+    if not channel_id:
 
         await interaction.response.send_message(
             embed=make_error_embed(
                 "Configuration Error",
-                (
-                    "No server information channel has been "
-                    "configured.\n\n"
-                    "Use `/config serverinfochannel`."
-                ),
+                "No server information channel has been configured.",
             ),
             ephemeral=True,
         )
@@ -875,7 +754,7 @@ async def serverinfo(
         return
 
     target_channel = interaction.guild.get_channel(
-        channel_id
+        int(channel_id)
     )
 
     if not isinstance(
@@ -886,7 +765,7 @@ async def serverinfo(
         await interaction.response.send_message(
             embed=make_error_embed(
                 "Channel Missing",
-                "The configured channel could not be found.",
+                "The configured server information channel could not be found.",
             ),
             ephemeral=True,
         )
@@ -895,10 +774,22 @@ async def serverinfo(
 
     guild = interaction.guild
 
+    text_channel_count = len(
+        guild.text_channels
+    )
+
+    voice_channel_count = len(
+        guild.voice_channels
+    )
+
     owner_text = (
         guild.owner.mention
         if guild.owner is not None
         else f"User ID: {guild.owner_id}"
+    )
+
+    created_timestamp = int(
+        guild.created_at.timestamp()
     )
 
     info_embed = discord.Embed(
@@ -933,18 +824,14 @@ async def serverinfo(
 
     info_embed.add_field(
         name="Text Channels",
-        value=str(len(guild.text_channels)),
+        value=str(text_channel_count),
         inline=True,
     )
 
     info_embed.add_field(
         name="Voice Channels",
-        value=str(len(guild.voice_channels)),
+        value=str(voice_channel_count),
         inline=True,
-    )
-
-    created_timestamp = int(
-        guild.created_at.timestamp()
     )
 
     info_embed.add_field(
@@ -964,39 +851,296 @@ async def serverinfo(
         )
 
         await interaction.response.send_message(
-            embed=make_success_embed(
-                "Server Information Sent",
-                (
-                    f"The information was posted in "
+            embed=discord.Embed(
+                title="Server Information Sent",
+                description=(
+                    f"The server information was posted in "
                     f"{target_channel.mention}."
                 ),
+                color=discord.Color.green(),
             ),
             ephemeral=True,
         )
 
     except discord.Forbidden:
 
-        await interaction.response.send_message(
-            embed=make_error_embed(
-                "Permission Error",
-                f"I cannot send messages in {target_channel.mention}.",
-            ),
-            ephemeral=True,
-        )
+        if not interaction.response.is_done():
+
+            await interaction.response.send_message(
+                embed=make_error_embed(
+                    "Permission Error",
+                    f"I cannot send messages in {target_channel.mention}.",
+                ),
+                ephemeral=True,
+            )
 
 
 # ============================================================
 # CONFIG GROUP
 # ============================================================
 
-config_group = app_commands.Group(
-    name="config",
-    description="Configure the bot",
-)
+class ConfigGroup(app_commands.Group):
+
+    def __init__(self):
+
+        super().__init__(
+            name="config",
+            description="Configure the Discord bot",
+        )
+
+
+config_group = ConfigGroup()
 
 
 # ============================================================
-# /CONFIG SHOW
+# CONFIG PERMISSION CHECK
+# ============================================================
+
+async def check_admin(
+    interaction: discord.Interaction,
+) -> bool:
+
+    if interaction.guild is None:
+
+        await interaction.response.send_message(
+            "This command can only be used inside a server.",
+            ephemeral=True,
+        )
+
+        return False
+
+    if not interaction.user.guild_permissions.administrator:
+
+        await interaction.response.send_message(
+            embed=make_error_embed(
+                "Permission Denied",
+                "You need **Administrator** permission to use this command.",
+            ),
+            ephemeral=True,
+        )
+
+        return False
+
+    return True
+
+
+# ============================================================
+# /config category
+# ============================================================
+
+@config_group.command(
+    name="category",
+    description="Set the ticket category",
+)
+@app_commands.describe(
+    category="The category where tickets should be created"
+)
+async def config_category(
+    interaction: discord.Interaction,
+    category: discord.CategoryChannel,
+):
+
+    if not await check_admin(interaction):
+        return
+
+    config["ticket_category_id"] = category.id
+
+    if config.get("guild_id") is None:
+        config["guild_id"] = interaction.guild.id
+
+    save_config(config)
+
+    await interaction.response.send_message(
+        embed=discord.Embed(
+            title="Ticket Category Updated",
+            description=(
+                f"New tickets will now be created in "
+                f"{category.mention}."
+            ),
+            color=discord.Color.green(),
+        ),
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /config staffrole
+# ============================================================
+
+@config_group.command(
+    name="staffrole",
+    description="Set the staff role",
+)
+@app_commands.describe(
+    role="The role that can access tickets"
+)
+async def config_staffrole(
+    interaction: discord.Interaction,
+    role: discord.Role,
+):
+
+    if not await check_admin(interaction):
+        return
+
+    config["staff_role_id"] = role.id
+
+    if config.get("guild_id") is None:
+        config["guild_id"] = interaction.guild.id
+
+    save_config(config)
+
+    await interaction.response.send_message(
+        embed=discord.Embed(
+            title="Staff Role Updated",
+            description=(
+                f"Ticket staff role is now {role.mention}."
+            ),
+            color=discord.Color.green(),
+        ),
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /config serverinfochannel
+# ============================================================
+
+@config_group.command(
+    name="serverinfochannel",
+    description="Set the server information channel",
+)
+@app_commands.describe(
+    channel="The channel where server information is posted"
+)
+async def config_serverinfochannel(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel,
+):
+
+    if not await check_admin(interaction):
+        return
+
+    config["server_info_channel_id"] = channel.id
+
+    if config.get("guild_id") is None:
+        config["guild_id"] = interaction.guild.id
+
+    save_config(config)
+
+    await interaction.response.send_message(
+        embed=discord.Embed(
+            title="Server Info Channel Updated",
+            description=(
+                f"Server information will now be posted in "
+                f"{channel.mention}."
+            ),
+            color=discord.Color.green(),
+        ),
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /config paneltitle
+# ============================================================
+
+@config_group.command(
+    name="paneltitle",
+    description="Change the ticket panel title",
+)
+@app_commands.describe(
+    title="New ticket panel title"
+)
+async def config_paneltitle(
+    interaction: discord.Interaction,
+    title: str,
+):
+
+    if not await check_admin(interaction):
+        return
+
+    config["panel_title"] = title[:256]
+
+    save_config(config)
+
+    await interaction.response.send_message(
+        embed=discord.Embed(
+            title="Panel Title Updated",
+            description=f"New title: **{config['panel_title']}**",
+            color=discord.Color.green(),
+        ),
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /config paneldescription
+# ============================================================
+
+@config_group.command(
+    name="paneldescription",
+    description="Change the ticket panel description",
+)
+@app_commands.describe(
+    description="New ticket panel description"
+)
+async def config_paneldescription(
+    interaction: discord.Interaction,
+    description: str,
+):
+
+    if not await check_admin(interaction):
+        return
+
+    config["panel_description"] = description[:4000]
+
+    save_config(config)
+
+    await interaction.response.send_message(
+        embed=discord.Embed(
+            title="Panel Description Updated",
+            description="The ticket panel description has been updated.",
+            color=discord.Color.green(),
+        ),
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /config welcome
+# ============================================================
+
+@config_group.command(
+    name="welcome",
+    description="Change the ticket welcome message",
+)
+@app_commands.describe(
+    message="New ticket welcome message"
+)
+async def config_welcome(
+    interaction: discord.Interaction,
+    message: str,
+):
+
+    if not await check_admin(interaction):
+        return
+
+    config["welcome_message"] = message[:4000]
+
+    save_config(config)
+
+    await interaction.response.send_message(
+        embed=discord.Embed(
+            title="Welcome Message Updated",
+            description="The ticket welcome message has been updated.",
+            color=discord.Color.green(),
+        ),
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /config show
 # ============================================================
 
 @config_group.command(
@@ -1007,80 +1151,51 @@ async def config_show(
     interaction: discord.Interaction,
 ):
 
-    if not is_admin(interaction):
-
-        await interaction.response.send_message(
-            "You need Administrator permission to use this.",
-            ephemeral=True,
-        )
-
+    if not await check_admin(interaction):
         return
 
-    guild = interaction.guild
+    category_id = config.get("ticket_category_id")
+    staff_role_id = config.get("staff_role_id")
+    server_info_id = config.get("server_info_channel_id")
 
-    category_id = get_config_id(
-        "ticket_category_id"
-    )
-
-    staff_role_id = get_config_id(
-        "staff_role_id"
-    )
-
-    server_info_id = get_config_id(
-        "server_info_channel_id"
-    )
-
-    category = (
-        guild.get_channel(category_id).mention
-        if guild and category_id
-        and guild.get_channel(category_id)
+    category_text = (
+        f"<#{category_id}>"
+        if category_id
         else "Not configured"
     )
 
-    staff_role = (
-        guild.get_role(staff_role_id).mention
-        if guild and staff_role_id
-        and guild.get_role(staff_role_id)
+    staff_text = (
+        f"<@&{staff_role_id}>"
+        if staff_role_id
         else "Not configured"
     )
 
-    server_info = (
-        guild.get_channel(server_info_id).mention
-        if guild and server_info_id
-        and guild.get_channel(server_info_id)
+    server_info_text = (
+        f"<#{server_info_id}>"
+        if server_info_id
         else "Not configured"
-    )
-
-    ticket_types = config.get(
-        "ticket_types",
-        {},
-    )
-
-    ticket_list = "\n".join(
-        f"• `{key}` — {data.get('label', key)}"
-        for key, data in ticket_types.items()
     )
 
     embed = discord.Embed(
         title="Bot Configuration",
-        color=discord.Color.blue(),
+        color=discord.Color.blurple(),
     )
 
     embed.add_field(
         name="Ticket Category",
-        value=category,
+        value=category_text,
         inline=False,
     )
 
     embed.add_field(
         name="Staff Role",
-        value=staff_role,
+        value=staff_text,
         inline=False,
     )
 
     embed.add_field(
         name="Server Info Channel",
-        value=server_info,
+        value=server_info_text,
         inline=False,
     )
 
@@ -1093,12 +1208,6 @@ async def config_show(
         inline=False,
     )
 
-    embed.add_field(
-        name="Ticket Types",
-        value=ticket_list or "None",
-        inline=False,
-    )
-
     await interaction.response.send_message(
         embed=embed,
         ephemeral=True,
@@ -1106,233 +1215,7 @@ async def config_show(
 
 
 # ============================================================
-# /CONFIG CATEGORY
-# ============================================================
-
-@config_group.command(
-    name="category",
-    description="Set the ticket category",
-)
-@app_commands.describe(
-    category="The Discord category where tickets will be created",
-)
-async def config_category(
-    interaction: discord.Interaction,
-    category: discord.CategoryChannel,
-):
-
-    if not is_admin(interaction):
-
-        await interaction.response.send_message(
-            "You need Administrator permission to use this.",
-            ephemeral=True,
-        )
-
-        return
-
-    config["ticket_category_id"] = category.id
-    save_config(config)
-
-    await interaction.response.send_message(
-        embed=make_success_embed(
-            "Ticket Category Updated",
-            f"Tickets will now be created in {category.mention}.",
-        ),
-        ephemeral=True,
-    )
-
-
-# ============================================================
-# /CONFIG STAFFROLE
-# ============================================================
-
-@config_group.command(
-    name="staffrole",
-    description="Set the staff role",
-)
-@app_commands.describe(
-    role="The role that can access tickets",
-)
-async def config_staffrole(
-    interaction: discord.Interaction,
-    role: discord.Role,
-):
-
-    if not is_admin(interaction):
-
-        await interaction.response.send_message(
-            "You need Administrator permission to use this.",
-            ephemeral=True,
-        )
-
-        return
-
-    config["staff_role_id"] = role.id
-    save_config(config)
-
-    await interaction.response.send_message(
-        embed=make_success_embed(
-            "Staff Role Updated",
-            f"The ticket staff role is now {role.mention}.",
-        ),
-        ephemeral=True,
-    )
-
-
-# ============================================================
-# /CONFIG SERVERINFOCHANNEL
-# ============================================================
-
-@config_group.command(
-    name="serverinfochannel",
-    description="Set the server information channel",
-)
-@app_commands.describe(
-    channel="Channel where /serverinfo posts information",
-)
-async def config_serverinfochannel(
-    interaction: discord.Interaction,
-    channel: discord.TextChannel,
-):
-
-    if not is_admin(interaction):
-
-        await interaction.response.send_message(
-            "You need Administrator permission to use this.",
-            ephemeral=True,
-        )
-
-        return
-
-    config["server_info_channel_id"] = channel.id
-    save_config(config)
-
-    await interaction.response.send_message(
-        embed=make_success_embed(
-            "Server Info Channel Updated",
-            f"Server information will be posted in {channel.mention}.",
-        ),
-        ephemeral=True,
-    )
-
-
-# ============================================================
-# /CONFIG PANELTITLE
-# ============================================================
-
-@config_group.command(
-    name="paneltitle",
-    description="Change the ticket panel title",
-)
-@app_commands.describe(
-    title="New ticket panel title",
-)
-async def config_paneltitle(
-    interaction: discord.Interaction,
-    title: str,
-):
-
-    if not is_admin(interaction):
-
-        await interaction.response.send_message(
-            "You need Administrator permission to use this.",
-            ephemeral=True,
-        )
-
-        return
-
-    title = title[:256]
-
-    config["panel_title"] = title
-    save_config(config)
-
-    await interaction.response.send_message(
-        embed=make_success_embed(
-            "Panel Title Updated",
-            f"New title: **{title}**",
-        ),
-        ephemeral=True,
-    )
-
-
-# ============================================================
-# /CONFIG PANELDESCRIPTION
-# ============================================================
-
-@config_group.command(
-    name="paneldescription",
-    description="Change the ticket panel description",
-)
-@app_commands.describe(
-    description="New ticket panel description",
-)
-async def config_paneldescription(
-    interaction: discord.Interaction,
-    description: str,
-):
-
-    if not is_admin(interaction):
-
-        await interaction.response.send_message(
-            "You need Administrator permission to use this.",
-            ephemeral=True,
-        )
-
-        return
-
-    description = description[:4096]
-
-    config["panel_description"] = description
-    save_config(config)
-
-    await interaction.response.send_message(
-        embed=make_success_embed(
-            "Panel Description Updated",
-            "The ticket panel description has been updated.",
-        ),
-        ephemeral=True,
-    )
-
-
-# ============================================================
-# /CONFIG WELCOME
-# ============================================================
-
-@config_group.command(
-    name="welcome",
-    description="Change the ticket welcome message",
-)
-@app_commands.describe(
-    message="Message shown inside newly created tickets",
-)
-async def config_welcome(
-    interaction: discord.Interaction,
-    message: str,
-):
-
-    if not is_admin(interaction):
-
-        await interaction.response.send_message(
-            "You need Administrator permission to use this.",
-            ephemeral=True,
-        )
-
-        return
-
-    config["ticket_welcome_message"] = message[:4000]
-    save_config(config)
-
-    await interaction.response.send_message(
-        embed=make_success_embed(
-            "Welcome Message Updated",
-            "New tickets will use the updated welcome message.",
-        ),
-        ephemeral=True,
-    )
-
-
-# ============================================================
-# /CONFIG RELOAD
+# /config reload
 # ============================================================
 
 @config_group.command(
@@ -1343,13 +1226,7 @@ async def config_reload(
     interaction: discord.Interaction,
 ):
 
-    if not is_admin(interaction):
-
-        await interaction.response.send_message(
-            "You need Administrator permission to use this.",
-            ephemeral=True,
-        )
-
+    if not await check_admin(interaction):
         return
 
     global config
@@ -1357,16 +1234,17 @@ async def config_reload(
     config = load_config()
 
     await interaction.response.send_message(
-        embed=make_success_embed(
-            "Configuration Reloaded",
-            "The configuration has been reloaded.",
+        embed=discord.Embed(
+            title="Configuration Reloaded",
+            description="The configuration has been reloaded.",
+            color=discord.Color.green(),
         ),
         ephemeral=True,
     )
 
 
 # ============================================================
-# ADD CONFIG GROUP
+# REGISTER CONFIG GROUP
 # ============================================================
 
 bot.tree.add_command(
@@ -1375,7 +1253,7 @@ bot.tree.add_command(
 
 
 # ============================================================
-# ERROR HANDLER
+# SLASH COMMAND ERROR HANDLER
 # ============================================================
 
 @bot.tree.error
@@ -1390,67 +1268,115 @@ async def on_app_command_error(
         exc_info=True,
     )
 
-    if interaction.response.is_done():
-        try:
+    message = (
+        "An unexpected error occurred while processing "
+        "the command."
+    )
+
+    if isinstance(
+        error,
+        app_commands.CommandInvokeError,
+    ):
+
+        original = error.original
+
+        if isinstance(
+            original,
+            discord.Forbidden,
+        ):
+
+            message = (
+                "I do not have the required Discord permissions "
+                "to complete this command."
+            )
+
+        elif isinstance(
+            original,
+            discord.HTTPException,
+        ):
+
+            message = (
+                "Discord returned an API error while processing "
+                "the command."
+            )
+
+    try:
+
+        error_embed = make_error_embed(
+            "Command Error",
+            message,
+        )
+
+        if interaction.response.is_done():
+
             await interaction.followup.send(
-                embed=make_error_embed(
-                    "Command Error",
-                    "Something went wrong while processing the command.",
-                ),
+                embed=error_embed,
                 ephemeral=True,
             )
-        except discord.HTTPException:
-            pass
 
-    else:
-
-        try:
+        else:
 
             await interaction.response.send_message(
-                embed=make_error_embed(
-                    "Command Error",
-                    "Something went wrong while processing the command.",
-                ),
+                embed=error_embed,
                 ephemeral=True,
             )
 
-        except discord.HTTPException:
-            pass
+    except discord.HTTPException:
+
+        logger.exception(
+            "Could not send command error response."
+        )
 
 
 # ============================================================
-# START BOT
+# STARTUP VALIDATION
 # ============================================================
 
-if not DISCORD_TOKEN:
+def validate_configuration() -> bool:
 
-    raise SystemExit(
-        "DISCORD_TOKEN is missing. "
-        "Add it to Render Environment Variables."
-    )
+    if not DISCORD_TOKEN:
+
+        logger.critical(
+            "DISCORD_TOKEN is missing."
+        )
+
+        return False
+
+    return True
 
 
-try:
+# ============================================================
+# RUN BOT
+# ============================================================
 
-    bot.run(
-        DISCORD_TOKEN,
-        reconnect=True,
-    )
+if __name__ == "__main__":
 
-except discord.LoginFailure:
+    if not validate_configuration():
 
-    logger.critical(
-        "Discord login failed. Check your DISCORD_TOKEN."
-    )
+        raise SystemExit(1)
 
-except KeyboardInterrupt:
+    try:
 
-    logger.info(
-        "Bot stopped."
-    )
+        bot.run(
+            DISCORD_TOKEN,
+            reconnect=True,
+        )
 
-except Exception:
+    except discord.LoginFailure:
 
-    logger.exception(
-        "Fatal bot error."
-    )
+        logger.critical(
+            "Discord login failed. "
+            "Make sure DISCORD_TOKEN is correct."
+        )
+
+    except KeyboardInterrupt:
+
+        logger.info(
+            "Bot stopped by user."
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Fatal bot error."
+        )
