@@ -1,0 +1,10 @@
+{
+    "guild_id": null,
+    "ticket_category_id": null,
+    "staff_role_id": null,
+    "server_info_channel_id": null,
+
+    "panel_title": "Support Ticket Center",
+    "panel_description": "Select a category from the dropdown menu below to open a private support ticket with our staff team.",
+    "welcome_message": "Thank you for contacting the staff team.\n\nA staff member will respond shortly.\n\nPlease provide as much relevant information as possible so we can assist you quickly."
+}
